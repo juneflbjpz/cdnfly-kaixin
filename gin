@@ -1,0 +1,186 @@
+要在 Gin 中实现一个 AES-256 加密的中间件，可以对所有传入或传出的请求数据进行加密和解密。这里我们将通过中间件的方式，拦截请求中的数据并对其进行处理。下面是一个具体实现，使用 AES-256 算法对请求和响应体进行加密和解密。
+
+1. AES-256 加密和解密函数
+
+首先，定义 AES-256 加密和解密函数，类似之前的实现，但专门用于处理请求数据。
+
+package main
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"io"
+)
+
+// AES-256 加密
+func encryptAES256(plaintext []byte, key []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := aesGCM.Seal(nonce, nonce, plaintext, nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// AES-256 解密
+func decryptAES256(ciphertext string, key []byte) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(ciphertext)
+	if err != nil {
+		return nil, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonceSize := aesGCM.NonceSize()
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+
+	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return plaintext, nil
+}
+
+2. 中间件实现
+
+接下来，我们创建 Gin 的中间件。这个中间件将负责拦截请求中的数据，对其进行加密或解密操作。
+
+package main
+
+import (
+	"bytes"
+	"io/ioutil"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+// AES-256 密钥
+var aesKey = []byte("thisis32bitlongpassphraseimusing") // 32 字节密钥，用于 AES-256 加密
+
+// 加密中间件
+func EncryptionMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 解密请求体
+		if c.Request.Method == http.MethodPost || c.Request.Method == http.MethodPut {
+			body, err := ioutil.ReadAll(c.Request.Body)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+				c.Abort()
+				return
+			}
+
+			// 解密数据
+			decryptedData, err := decryptAES256(string(body), aesKey)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "failed to decrypt"})
+				c.Abort()
+				return
+			}
+
+			// 将解密后的数据重新放回请求体中
+			c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(decryptedData))
+		}
+
+		// 处理请求
+		c.Next()
+
+		// 加密响应体
+		if c.Writer.Status() == http.StatusOK {
+			respBody, err := ioutil.ReadAll(c.Writer.Body)
+			if err == nil && len(respBody) > 0 {
+				// 加密响应数据
+				encryptedData, err := encryptAES256(respBody, aesKey)
+				if err == nil {
+					// 将加密后的响应写回
+					c.Writer.Write([]byte(encryptedData))
+				}
+			}
+		}
+	}
+}
+
+3. Gin 路由中使用中间件
+
+接下来，我们在 Gin 中使用这个中间件，拦截传入的 POST 或 PUT 请求，对请求数据进行解密，处理后再对响应数据加密。
+
+package main
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	r := gin.Default()
+
+	// 使用 AES-256 加密中间件
+	r.Use(EncryptionMiddleware())
+
+	// 示例路由
+	r.POST("/data", func(c *gin.Context) {
+		var json struct {
+			Message string `json:"message"`
+		}
+
+		// 绑定解密后的 JSON 数据
+		if err := c.ShouldBindJSON(&json); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid data"})
+			return
+		}
+
+		// 返回处理后的数据
+		c.JSON(http.StatusOK, gin.H{
+			"received": json.Message,
+		})
+	})
+
+	r.Run(":8080") // 监听端口
+}
+
+4. 测试请求
+
+加密请求数据
+
+假设我们有以下明文数据：
+
+{
+  "message": "hello world"
+}
+
+在请求时，你需要先对数据进行 AES-256 加密（使用与服务器相同的密钥），然后将加密后的数据发送到服务器。
+
+示例请求
+
+curl -X POST http://localhost:8080/data -H "Content-Type: application/json" -d '<encrypted_data>'
+
+服务器会接收加密的数据，解密后处理，并将响应数据进行加密返回给客户端。
+
+5. 总结
+
+此实现展示了如何通过 Gin 中间件拦截请求和响应数据，利用 AES-256 加密算法对传输中的数据进行加密和解密。这样可以确保在通信过程中保护敏感信息的安全。
